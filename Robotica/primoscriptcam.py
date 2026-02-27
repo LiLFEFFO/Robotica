@@ -1,67 +1,88 @@
 from picamera2 import Picamera2
 import cv2
 import numpy as np
+import serial
+import time
 
-# --- Inizializzazione camera ---
+# ==============================
+# SERIAL SETUP
+# ==============================
+
+ser = serial.Serial('/dev/ttyACM0', 9600, timeout=1)
+time.sleep(2)  # Attendi reset Arduino
+
+print("Connessione ad Arduino stabilita")
+
+# ==============================
+# CAMERA SETUP
+# ==============================
+
 picam2 = Picamera2()
-
-config = picam2.create_preview_configuration(
-    main={"format": "RGB888", "size": (640, 480)},
+picam2.configure(
+    picam2.create_preview_configuration(
+        main={"format": "RGB888", "size": (320, 240)}
+    )
 )
-picam2.configure(config)
 picam2.start()
 
-print("Camera avviata. Premi ESC per uscire.")
+last_direction = None
+
+# ==============================
+# MAIN LOOP
+# ==============================
 
 while True:
-    # Acquisisci frame dalla camera
     frame = picam2.capture_array()
-    
-    #Ruota di 180 gradi per vedere giusto
-    frame = cv2.rotate(frame, cv2.ROTATE_180)
+    frame = cv2.flip(frame, -1)
 
-    # Converti in scala di grigi
     gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    _, bw = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
 
-    # Blur per ridurre rumore
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    h, w = bw.shape
+    roi_y = int(h * 0.7)
+    roi = bw[roi_y:h, :]
 
-    # Threshold per linea scura (invertita)
-    _, thresh = cv2.threshold(blur, 100, 255, cv2.THRESH_BINARY_INV)
+    ys, xs = np.where(roi == 255)
 
-    h, w = thresh.shape
+    if len(xs) > 50:
 
-    # Considera solo parte bassa (roi)
-    roi = thresh[int(h * 0.6):h, :]
+        cx = int(xs.mean())
+        center = w // 2
+        tol = w * 0.1
 
-    # Cerca contorni
-    contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    if contours:
-        # Contorno più grande = linea principale
-        c = max(contours, key=cv2.contourArea)
-        M = cv2.moments(c)
-
-        if M["m00"] > 0:
-            cx = int(M["m10"] / M["m00"])
-            cy = int(M["m01"] / M["m00"])
-
-            # Disegna il centroide
-            cv2.circle(frame, (cx, cy + int(h * 0.6)), 5, (0, 0, 255), -1)
-            cv2.drawContours(frame[int(h * 0.6):h, :], [c], -1, (0, 255, 0), 2)
-
-            print("Linea trovata alla X =", cx)
+        if cx < center - tol:
+            direction = "SINISTRA"
+        elif cx > center + tol:
+            direction = "DESTRA"
         else:
-            print("Linea non trovata")
+            direction = "CENTRO"
+
+        if direction != last_direction:
+            print("Invio:", direction)
+            ser.write((direction + "\n").encode())
+            last_direction = direction
+
+        cv2.circle(frame, (cx, roi_y + 5), 5, (0, 0, 255), -1)
+
     else:
-        print("Nessun contorno trovato")
+        # Se non vede la linea ? stop
+        if last_direction != "STOP":
+            print("Invio: STOP")
+            ser.write(("STOP\n").encode())
+            last_direction = "STOP"
 
-    # Mostra finestre debug
-    cv2.imshow("Frame", frame)
-    cv2.imshow("Threshold", roi)
+    cv2.line(frame, (0, roi_y), (w, roi_y), (255, 255, 0), 1)
+    cv2.line(frame, (w // 2, 0), (w // 2, h), (0, 255, 0), 1)
 
-    # ESC per uscire
+    cv2.imshow("Line Tracker", frame)
+    cv2.imshow("ROI", roi)
+
     if cv2.waitKey(1) & 0xFF == 27:
         break
 
+# ==============================
+# CLEAN EXIT
+# ==============================
+
+ser.close()
 cv2.destroyAllWindows()
